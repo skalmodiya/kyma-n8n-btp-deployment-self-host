@@ -1,492 +1,485 @@
-# n8n on SAP Kyma / BTP — Self-Hosted Deployment
+# Running n8n on SAP BTP Kyma Runtime – End-to-End Beginner Guide
 
-Deploy [n8n](https://n8n.io) — the open-source workflow automation platform — as a self-hosted instance on **SAP Business Technology Platform (BTP)** using **SAP Kyma** (managed Kubernetes).
+## Introduction
 
-This repository contains the complete set of Kubernetes manifests needed to get n8n running behind the Kyma API Gateway with basic-auth protection, in under 10 minutes.
+I wanted to learn **SAP BTP Kyma Runtime** by building something real instead of only reading Kubernetes concepts.
 
----
+The goal was simple:
 
-## Table of Contents
+> Deploy a self-hosted instance of [n8n](https://n8n.io) on SAP BTP Kyma Runtime and expose it publicly.
 
-1. [What is n8n?](#what-is-n8n)
-2. [Architecture Overview](#architecture-overview)
-3. [Repository Structure](#repository-structure)
-4. [Prerequisites](#prerequisites)
-5. [Step-by-Step Deployment Guide](#step-by-step-deployment-guide)
-   - [Step 1 — Clone the Repository](#step-1--clone-the-repository)
-   - [Step 2 — Update Your Credentials](#step-2--update-your-credentials)
-   - [Step 3 — Connect kubectl to Your Kyma Cluster](#step-3--connect-kubectl-to-your-kyma-cluster)
-   - [Step 4 — Create the Namespace](#step-4--create-the-namespace)
-   - [Step 5 — Apply the Secret](#step-5--apply-the-secret)
-   - [Step 6 — Deploy n8n](#step-6--deploy-n8n)
-   - [Step 7 — Expose the Service](#step-7--expose-the-service)
-   - [Step 8 — Create the API Rule](#step-8--create-the-api-rule)
-   - [Step 9 — Verify the Deployment](#step-9--verify-the-deployment)
-   - [Step 10 — Access n8n](#step-10--access-n8n)
-6. [Configuration Reference](#configuration-reference)
-7. [Updating n8n](#updating-n8n)
-8. [Teardown / Cleanup](#teardown--cleanup)
-9. [Troubleshooting](#troubleshooting)
-10. [Security Considerations](#security-considerations)
+During the journey I learned:
 
----
+- Kubernetes Deployments
+- Pods
+- Services
+- APIRules
+- Istio sidecar injection
+- Kyma Gateway
+- Namespace management
+- Public routing
+- Troubleshooting frontend routes
 
-## What is n8n?
-
-[n8n](https://n8n.io) is a **fair-code, self-hostable workflow automation tool** — similar to Zapier or Make (Integromat) — that lets you connect apps, automate tasks, and build complex integrations through a visual node-based editor. Because it is self-hosted, your data never leaves your own infrastructure.
-
----
-
-## Architecture Overview
+At the end we successfully deployed:
 
 ```
-Internet
-    │
-    ▼
-┌──────────────────────────────────────────────┐
-│  SAP Kyma (managed Kubernetes on BTP)        │
-│                                              │
-│  ┌─────────────────┐                         │
-│  │  Kyma Gateway   │  (Istio-based ingress)  │
-│  └────────┬────────┘                         │
-│           │  APIRule: n8n-v2 (all HTTP verbs)│
-│           ▼                                  │
-│  ┌─────────────────┐  Namespace: n8n-v2      │
-│  │  Service        │  ClusterIP :5678        │
-│  │  n8n-service    │                         │
-│  └────────┬────────┘                         │
-│           │                                  │
-│           ▼                                  │
-│  ┌─────────────────┐                         │
-│  │  Deployment     │  n8nio/n8n:latest       │
-│  │  n8n (1 pod)    │  Basic-auth enabled     │
-│  └─────────────────┘                         │
-│           │                                  │
-│  Secret: n8n-secret (credentials)            │
-└──────────────────────────────────────────────┘
-```
-
-| Component | Kind | Purpose |
-|-----------|------|---------|
-| `namespace.yaml` | `Namespace` | Isolated namespace `n8n-v2` |
-| `secret.yaml` | `Secret` | Basic-auth credentials injected as env vars |
-| `deployment.yaml` | `Deployment` | Runs the n8n container |
-| `service.yaml` | `Service` | Internal ClusterIP service on port 5678 |
-| `apirule.yaml` | `APIRule` | Kyma gateway rule that exposes the service externally |
-
----
-
-## Repository Structure
-
-```
-kyma-n8n-btp-deployment-self-host/
-├── namespace.yaml      # Kubernetes Namespace (n8n-v2)
-├── secret.yaml         # Opaque Secret with n8n credentials
-├── deployment.yaml     # n8n Deployment (1 replica)
-├── service.yaml        # ClusterIP Service on port 5678
-└── apirule.yaml        # Kyma APIRule for external access
+SAP BTP Subaccount
+        ↓
+Kyma Runtime
+        ↓
+Kubernetes Cluster
+        ↓
+Namespace
+        ↓
+Deployment
+        ↓
+Pod
+ ├── n8n container
+ └── istio sidecar
+        ↓
+Service
+        ↓
+APIRule
+        ↓
+Kyma Gateway
+        ↓
+Public URL
 ```
 
 ---
 
 ## Prerequisites
 
-Before you begin, make sure you have the following:
+Before starting, ensure you have the following in place.
 
-### Tools
+### Installed locally
 
-| Tool | Minimum Version | Install Guide |
-|------|----------------|---------------|
-| `kubectl` | v1.26+ | [kubernetes.io/docs](https://kubernetes.io/docs/tasks/tools/) |
-| `git` | any | [git-scm.com](https://git-scm.com/downloads) |
+| Tool | Purpose |
+|------|---------|
+| [Docker Desktop](https://www.docker.com/products/docker-desktop/) | Container runtime |
+| [kubectl](https://kubernetes.io/docs/tasks/tools/) | Kubernetes CLI |
+| [kubelogin](https://github.com/int128/kubelogin) | OIDC login for kubectl |
 
-### SAP BTP / Kyma
+### SAP setup
 
-- An active **SAP BTP subaccount** with the **Kyma Environment** enabled
-- The **kubeconfig** file for your Kyma cluster downloaded from the BTP Cockpit
-- **Kyma API Gateway** module installed on the cluster (enabled by default on most Kyma instances)
+```
+SAP BTP Trial / Global Account
+        ↓
+Subaccount
+        ↓
+Kyma Runtime enabled
+```
 
-### Permissions
-
-Your BTP user needs at least the **Namespace Admin** cluster role (or **Kyma admin**) to create namespaces and apply APIRules.
-
----
-
-## Step-by-Step Deployment Guide
-
-### Step 1 — Clone the Repository
+### Verify cluster connection
 
 ```bash
-git clone https://github.com/skalmodiya/kyma-n8n-btp-deployment-self-host.git
-cd kyma-n8n-btp-deployment-self-host
+kubectl get namespaces
+```
+
+Expected output should include:
+
+```
+default
+kyma-system
+istio-system
+kube-system
 ```
 
 ---
 
-### Step 2 — Update Your Credentials
+## Step 1 – Create Namespace
 
-> **Important:** The default password in `secret.yaml` is a placeholder. Change it before deploying to any environment.
-
-Open `secret.yaml` in your editor:
+Create `namespace.yaml`:
 
 ```yaml
-stringData:
-  N8N_BASIC_AUTH_USER: admin          # <-- change to your desired username
-  N8N_BASIC_AUTH_PASSWORD: ChangeMe123  # <-- change to a strong password
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: n8n-v2
 ```
 
-Save the file. These values are injected directly as environment variables into the n8n container at startup.
-
-**Tip:** For a strong password you can generate one with:
-```bash
-# Linux/macOS
-openssl rand -base64 20
-
-# Windows (PowerShell)
-[System.Web.Security.Membership]::GeneratePassword(20,4)
-```
-
----
-
-### Step 3 — Connect kubectl to Your Kyma Cluster
-
-1. Log in to the **SAP BTP Cockpit** (`cockpit.btp.cloud.sap`)
-2. Navigate to your **Subaccount → Kyma Environment**
-3. Click **"Download Kubeconfig"**
-4. Save the file (e.g., `kyma-kubeconfig.yaml`) and point `kubectl` to it:
-
-```bash
-export KUBECONFIG=/path/to/kyma-kubeconfig.yaml
-
-# Verify the connection
-kubectl cluster-info
-kubectl get nodes
-```
-
-You should see your Kyma cluster nodes listed with `Ready` status.
-
----
-
-### Step 4 — Create the Namespace
-
-All n8n resources live in the dedicated `n8n-v2` namespace.
+Deploy it:
 
 ```bash
 kubectl apply -f namespace.yaml
 ```
 
-Expected output:
-```
-namespace/n8n-v2 created
+Enable Istio sidecar injection for the namespace:
+
+```bash
+kubectl label namespace n8n-v2 istio-injection=enabled
 ```
 
-Confirm it exists:
+Verify the label was applied:
+
 ```bash
-kubectl get namespace n8n-v2
+kubectl get ns n8n-v2 --show-labels
+```
+
+Expected output includes:
+
+```
+istio-injection=enabled
 ```
 
 ---
 
-### Step 5 — Apply the Secret
+## Step 2 – Create Secret
 
-The secret stores the n8n basic-auth credentials as Kubernetes-managed environment variables.
+The secret stores n8n's basic-auth credentials and injects them as environment variables into the container.
+
+Create `secret.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: n8n-secret
+  namespace: n8n-v2
+type: Opaque
+stringData:
+  N8N_BASIC_AUTH_USER: admin
+  N8N_BASIC_AUTH_PASSWORD: ChangeMe123
+```
+
+> **Important:** Change `ChangeMe123` to a strong password before deploying.
+
+Deploy it:
 
 ```bash
 kubectl apply -f secret.yaml
 ```
 
-Expected output:
-```
-secret/n8n-secret created
-```
-
-Verify (note: values are base64-encoded and not shown in plaintext by default):
-```bash
-kubectl get secret n8n-secret -n n8n-v2
-```
-
 ---
 
-### Step 6 — Deploy n8n
+## Step 3 – Deploy n8n
 
-Apply the Deployment manifest to create the n8n pod:
+Create `deployment.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n
+  namespace: n8n-v2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: n8n
+  template:
+    metadata:
+      labels:
+        app: n8n
+    spec:
+      containers:
+      - name: n8n
+        image: n8nio/n8n:latest
+        ports:
+        - containerPort: 5678
+        env:
+        - name: N8N_BASIC_AUTH_ACTIVE
+          value: "true"
+        - name: N8N_HOST
+          value: "n8n-v2"
+        - name: N8N_PROTOCOL
+          value: "https"
+        - name: N8N_PORT
+          value: "5678"
+        - name: N8N_EDITOR_BASE_URL
+          value: "/"
+        - name: WEBHOOK_URL
+          value: "/"
+        envFrom:
+        - secretRef:
+            name: n8n-secret
+```
+
+Deploy it:
 
 ```bash
 kubectl apply -f deployment.yaml
 ```
 
-Expected output:
-```
-deployment.apps/n8n created
-```
+Verify the pod is running:
 
-Watch the pod come up (this may take 30–60 seconds as it pulls the image):
-```bash
-kubectl rollout status deployment/n8n -n n8n-v2
-```
-
-You should see:
-```
-deployment "n8n" successfully rolled out
-```
-
-Check the pod is `Running`:
 ```bash
 kubectl get pods -n n8n-v2
 ```
 
+Expected output:
+
 ```
 NAME                   READY   STATUS    RESTARTS   AGE
-n8n-xxxxxxxxxx-xxxxx   1/1     Running   0          45s
+n8n-xxxxxxxxxx-xxxxx   2/2     Running   0          45s
 ```
+
+### Why 2/2?
+
+Kyma automatically injects an Istio sidecar into every pod in a labelled namespace:
+
+```
+Pod
+ ├── n8n container       ← your app
+ └── istio-proxy         ← injected by Kyma
+```
+
+`2/2` means both containers are running — this is expected and correct.
 
 ---
 
-### Step 7 — Expose the Service
+## Step 4 – Create Service
 
-Create the internal ClusterIP service that routes traffic from the API gateway to the n8n pod:
+Create `service.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: n8n-service
+  namespace: n8n-v2
+spec:
+  selector:
+    app: n8n
+  ports:
+  - port: 5678
+    targetPort: 5678
+  type: ClusterIP
+```
+
+Deploy it:
 
 ```bash
 kubectl apply -f service.yaml
 ```
 
-Expected output:
+### Why do we need a Service?
+
+Pods are ephemeral — they can be replaced at any time with a new IP address. A Service provides a stable internal endpoint that always routes to healthy pods.
+
+Without Service:
 ```
-service/n8n-service created
+APIRule → Pod directly ❌  (breaks when pod restarts)
 ```
 
-Verify:
-```bash
-kubectl get service n8n-service -n n8n-v2
+With Service:
 ```
-
-```
-NAME          TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
-n8n-service   ClusterIP   10.x.x.x        <none>        5678/TCP   10s
+APIRule → Service → Pod ✅  (stable, always works)
 ```
 
 ---
 
-### Step 8 — Create the API Rule
+## Step 5 – Expose via APIRule
 
-The `APIRule` tells Kyma's API Gateway to forward external traffic for the host `n8n-v2` to the `n8n-service`:
+Create `apirule.yaml`:
+
+```yaml
+apiVersion: gateway.kyma-project.io/v2
+kind: APIRule
+metadata:
+  name: n8n-api
+  namespace: n8n-v2
+spec:
+  gateway: kyma-system/kyma-gateway
+  hosts:
+    - n8n-v2
+  service:
+    name: n8n-service
+    port: 5678
+  rules:
+    - path: /*
+      methods:
+        - GET
+        - POST
+        - PUT
+        - PATCH
+        - DELETE
+        - OPTIONS
+      noAuth: true
+```
+
+Deploy it:
 
 ```bash
 kubectl apply -f apirule.yaml
 ```
 
-Expected output:
-```
-apirule.gateway.kyma-project.io/n8n-api created
+Verify the APIRule is ready:
+
+```bash
+kubectl get apirule -n n8n-v2
 ```
 
-Check that the APIRule is in `Ready` state:
-```bash
-kubectl get apirule n8n-api -n n8n-v2
-```
+Expected output:
 
 ```
 NAME      STATUS   HOST
-n8n-api   Ready    n8n-v2.<your-kyma-cluster-domain>
-```
-
-> It may take 1–2 minutes for the gateway to reconcile and become `Ready`.
-
----
-
-### Step 9 — Verify the Deployment
-
-Run a full status check across all resources:
-
-```bash
-kubectl get all -n n8n-v2
-```
-
-You should see something similar to:
-
-```
-NAME                       READY   STATUS    RESTARTS   AGE
-pod/n8n-xxxxxxxxxx-xxxxx   1/1     Running   0          2m
-
-NAME                  TYPE        CLUSTER-IP    PORT(S)    AGE
-service/n8n-service   ClusterIP   10.x.x.x      5678/TCP   2m
-
-NAME                  READY   UP-TO-DATE   AVAILABLE   AGE
-deployment.apps/n8n   1/1     1            1           2m
-
-NAME                             DESIRED   CURRENT   READY   AGE
-replicaset.apps/n8n-xxxxxxxxxx   1         1         1       2m
-```
-
-Check the n8n application logs to confirm it started successfully:
-```bash
-kubectl logs -n n8n-v2 deployment/n8n --tail=50
-```
-
-Look for a line like:
-```
-Editor is now accessible via:
-http://localhost:5678/
+n8n-api   Ready    n8n-v2.<your-cluster-domain>
 ```
 
 ---
 
-### Step 10 — Access n8n
+## Final Architecture
 
-Get your Kyma cluster's base domain:
+```
+Browser
+    ↓
+Kyma Gateway  (Istio-based ingress)
+    ↓
+APIRule  (n8n-api — routes /* to n8n-service)
+    ↓
+Service  (n8n-service — ClusterIP :5678)
+    ↓
+Deployment  (n8n — 1 replica)
+    ↓
+Pod
+ ├── n8n container
+ └── istio-proxy
+```
+
+---
+
+## Public URL
+
+Kyma automatically resolves the short hostname in the APIRule to a full public URL using the cluster domain.
+
+Given:
+
+```yaml
+hosts:
+  - n8n-v2
+```
+
+Kyma exposes:
+
+```
+https://n8n-v2.<cluster-domain>
+```
+
+For example:
+
+```
+https://n8n-v2.f9cc102.stage.kyma.ondemand.com
+```
+
+No cluster ID needs to be hardcoded anywhere in your manifests.
+
+Get your URL at any time:
+
 ```bash
 kubectl get apirule n8n-api -n n8n-v2 -o jsonpath='{.spec.hosts[0]}'
 ```
 
-The full URL will be:
-```
-https://n8n-v2.<your-kyma-cluster-id>.kyma.ondemand.com
-```
-
-Open the URL in your browser. You will be prompted for the basic-auth credentials you set in `secret.yaml`.
-
-**Default credentials (change these!):**
-- Username: `admin`
-- Password: `ChangeMe123`
-
-After logging in, you will be greeted by the n8n workflow editor and can start building automations.
+Open the URL in your browser and log in with the credentials from `secret.yaml`.
 
 ---
 
-## Configuration Reference
+## Troubleshooting — Lessons Learned
 
-### Deployment Environment Variables (`deployment.yaml`)
+### 1. Istio injection missing
 
-| Variable | Value | Description |
-|----------|-------|-------------|
-| `N8N_BASIC_AUTH_ACTIVE` | `"true"` | Enables username/password protection |
-| `N8N_HOST` | `"n8n-v2"` | Hostname n8n advertises for itself |
-| `N8N_PROTOCOL` | `"https"` | Protocol used for generated URLs |
-| `N8N_PORT` | `"5678"` | Port n8n listens on inside the container |
-| `N8N_EDITOR_BASE_URL` | `"/"` | Base path for the web editor |
-| `WEBHOOK_URL` | `"/"` | Base path for incoming webhooks |
+**Symptom:** Pod shows `1/1` instead of `2/2`, or traffic is blocked.
 
-### Secret Variables (`secret.yaml`)
+**Cause:** Namespace was not labelled for Istio injection before the pod was created.
 
-| Variable | Description |
-|----------|-------------|
-| `N8N_BASIC_AUTH_USER` | Login username for n8n |
-| `N8N_BASIC_AUTH_PASSWORD` | Login password for n8n |
-
-### APIRule (`apirule.yaml`)
-
-| Field | Value | Description |
-|-------|-------|-------------|
-| `gateway` | `kyma-system/kyma-gateway` | Uses the built-in Kyma Istio gateway |
-| `hosts` | `["n8n-v2"]` | Subdomain on the cluster domain |
-| `service.port` | `5678` | Forwards traffic to the ClusterIP service |
-| `noAuth` | `true` | No OAuth/JWT at the gateway; relies on app-level auth |
-
----
-
-## Updating n8n
-
-To pull a newer version of the n8n image, update the image tag in `deployment.yaml` (or trigger a rollout if using `latest`):
+**Fix:**
 
 ```bash
-# Force a new rollout (re-pulls the :latest image)
+kubectl label namespace n8n-v2 istio-injection=enabled
 kubectl rollout restart deployment/n8n -n n8n-v2
-
-# Watch progress
-kubectl rollout status deployment/n8n -n n8n-v2
 ```
 
-To pin to a specific version (recommended for production), edit `deployment.yaml`:
+---
+
+### 2. Frontend JS assets returned 404
+
+**Symptom:** n8n loads a blank page or throws 404 errors for `/assets/`, `/rest/`, `/workflow/`.
+
+**Cause:** The initial APIRule used `path: /` which only matched the root path, not sub-paths.
+
+**Bad:**
 ```yaml
-image: n8nio/n8n:1.40.0   # replace with the desired version
+path: /
 ```
-Then re-apply:
-```bash
-kubectl apply -f deployment.yaml
+
+**Fix:**
+```yaml
+path: /*
+```
+
+The wildcard `/*` is required because n8n loads its frontend assets, API calls, and workflow routes from multiple sub-paths.
+
+---
+
+### 3. Hardcoding the cluster domain
+
+**Symptom:** n8n generates incorrect webhook URLs or breaks after cluster maintenance changes the domain.
+
+**Bad:**
+```yaml
+N8N_HOST: n8n.f9cc102.stage.kyma.ondemand.com
+```
+
+**Better:**
+```yaml
+N8N_HOST: n8n-v2
+```
+
+Kyma resolves the full domain automatically. Hardcoding the cluster ID makes the config brittle.
+
+---
+
+## Current Limitation
+
+This setup uses SQLite inside the pod as n8n's default database:
+
+```
+n8n pod
+   └── SQLite (inside container filesystem)
+```
+
+**Risk:** If the pod is deleted or restarted, workflow data may be lost.
+
+**Recommended production setup:**
+
+```
+n8n pod
+   ↓
+Persistent Volume Claim
+   ↓
+PostgreSQL (external or in-cluster)
+   ↓
+Regular backups
 ```
 
 ---
 
-## Teardown / Cleanup
+## Conclusion
 
-To remove all n8n resources from the cluster, delete the namespace (this cascades to all resources inside it):
+This project turned out to be a great hands-on introduction to Kyma Runtime.
 
-```bash
-kubectl delete namespace n8n-v2
+Instead of learning Kubernetes theory in isolation, deploying n8n made the following concepts concrete and real:
+
+| Concept | What it did here |
+|---------|-----------------|
+| Namespace | Isolated all n8n resources |
+| Deployment | Ran the n8n container |
+| Pod | Hosted n8n + Istio sidecar |
+| Service | Provided stable internal routing |
+| APIRule | Exposed the app to the internet |
+| Kyma Gateway | Terminated TLS and routed traffic |
+| Istio | Injected sidecar, enforced policies |
+
+Final result:
+
+```
+SAP BTP
+    ↓
+Kyma Runtime
+    ↓
+Self-hosted n8n
+    ↓
+Public URL
 ```
 
-To remove resources individually:
-```bash
-kubectl delete -f apirule.yaml
-kubectl delete -f service.yaml
-kubectl delete -f deployment.yaml
-kubectl delete -f secret.yaml
-kubectl delete -f namespace.yaml
-```
-
----
-
-## Troubleshooting
-
-### Pod is stuck in `Pending`
-
-```bash
-kubectl describe pod -n n8n-v2 -l app=n8n
-```
-
-Common causes:
-- **Insufficient cluster resources** — the Kyma trial tier has limited CPU/memory; check node capacity with `kubectl top nodes`
-- **Image pull failure** — verify internet connectivity from the cluster
-
-### Pod is in `CrashLoopBackOff`
-
-```bash
-kubectl logs -n n8n-v2 deployment/n8n --previous
-```
-
-Common causes:
-- Misconfigured environment variables
-- Secret not found — ensure `secret.yaml` was applied before `deployment.yaml`
-
-### APIRule is not `Ready`
-
-```bash
-kubectl describe apirule n8n-api -n n8n-v2
-```
-
-Common causes:
-- Kyma API Gateway module not installed — check with `kubectl get module kyma-system 2>/dev/null || kubectl get apirules --all-namespaces`
-- Wrong `gateway` reference — must match the installed gateway name
-
-### Cannot reach the n8n URL
-
-1. Confirm the APIRule is `Ready` (see above)
-2. Check you're using `https://` (not `http://`)
-3. Try curling from a local machine: `curl -I https://n8n-v2.<cluster-domain>`
-4. Verify DNS has propagated: `nslookup n8n-v2.<cluster-domain>`
-
-### Forgot the password
-
-Update `secret.yaml` with a new password and re-apply, then restart the pod:
-
-```bash
-kubectl apply -f secret.yaml
-kubectl rollout restart deployment/n8n -n n8n-v2
-```
-
----
-
-## Security Considerations
-
-- **Change the default password** before any deployment — `ChangeMe123` is a placeholder only
-- The `APIRule` uses `noAuth: true`, meaning Kyma's gateway does not enforce a token; authentication relies entirely on n8n's built-in basic auth
-- Consider adding a Kyma `AuthorizationPolicy` or switching to JWT-based auth in `apirule.yaml` for stricter access control
-- The deployment uses `n8nio/n8n:latest` — for production workloads, pin to a specific version to avoid unexpected breaking changes
-- n8n workflows can execute arbitrary code (via the Code node and Execute Command node); ensure only trusted users have login access
-- This setup has **no persistent volume** — workflow data is lost if the pod restarts. For production use, add a `PersistentVolumeClaim` or connect n8n to an external database (PostgreSQL/MySQL)
-
----
-
-## License
-
-This project is released under the [MIT License](LICENSE).
+And that was my first real application running on SAP BTP Kyma Runtime 🚀
