@@ -1,0 +1,31 @@
+apiVersion: gateway.kyma-project.io/v2
+kind: APIRule
+
+metadata:
+  name: n8n-api
+  namespace: n8n-v2
+
+spec:
+
+  gateway: kyma-system/kyma-gateway
+
+  hosts:
+    - n8n-v2
+
+  service:
+    name: n8n-service
+    port: 5678
+
+  rules:
+
+    - path: /*
+
+      methods:
+        - GET
+        - POST
+        - PUT
+        - PATCH
+        - DELETE
+        - OPTIONS
+
+      noAuth: true
